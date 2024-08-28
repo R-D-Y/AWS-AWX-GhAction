@@ -1,0 +1,182 @@
+name: Deploy EC2 Instance with optional Load Balancer
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_type:
+        description: "Taille de ton ec2 (t2.nano, t2.micro, t2.small)"
+        required: true
+        default: "t2.micro"
+        type: choice
+        options:
+          - "t2.nano"
+          - "t2.micro"
+          - "t2.small"
+      instance_count:
+        description: "Nombre d'instances"
+        required: true
+        default: "2"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+      aws_region:
+        description: "Choix de la région"
+        required: true
+        default: "eu-west-2"
+        type: choice
+        options:
+          - "eu-west-1" # Irlande
+          - "eu-west-2" # Londres
+          - "eu-west-3" # Paris
+      add_load_balancer:
+        description: "Voulez-vous ajouter un Load Balancer ? (oui/non)"
+        required: true
+        default: "non"
+        type: choice
+        options:
+          - "oui"
+          - "non"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ github.event.inputs.aws_region }}
+
+    - name: Set Region Specific Parameters
+      run: |
+        if [ "${{ github.event.inputs.aws_region }}" = "eu-west-1" ]; then
+          echo "IMAGE_ID=ami-000000a0000aa0a00" >> $GITHUB_ENV
+          echo "SECURITY_GROUP_IDS=sg-000000a0000aa0a00" >> $GITHUB_ENV
+          echo "SUBNET_ID=subnet-000000a0000aa0a00" >> $GITHUB_ENV
+          echo "KEY_NAME=AWX__KEY-west-1" >> $GITHUB_ENV
+        elif [ "${{ github.event.inputs.aws_region }}" = "eu-west-2" ]; then
+          echo "IMAGE_ID=ami-000000a0000aa0a00" >> $GITHUB_ENV
+          echo "SECURITY_GROUP_IDS=sg-000000a0000aa0a00" >> $GITHUB_ENV
+          echo "SUBNET_ID1=subnet-000000a0000aa0a00" >> $GITHUB_ENV
+          echo "SUBNET_ID2=subnet-000000a0000aa0a00" >> $GITHUB_ENV
+          echo "KEY_NAME=AWX__KEY" >> $GITHUB_ENV
+          echo "VPC_ID=vpc-000000a0000aa0a00" >> $GITHUB_ENV
+        elif [ "${{ github.event.inputs.aws_region }}" = "eu-west-3" ]; then
+          echo "IMAGE_ID=ami-000000a0000aa0a00" >> $GITHUB_ENV
+          echo "SECURITY_GROUP_IDS=sg-000000a0000aa0a00" >> $GITHUB_ENV
+          echo "SUBNET_ID=subnet-000000a0000aa0a00" >> $GITHUB_ENV
+          echo "KEY_NAME=AWX__KEY-west-3" >> $GITHUB_ENV
+        fi
+
+    - name: Deploy EC2 instances
+      run: |
+        INSTANCE_IDS=""
+        for i in $(seq 1 ${{ github.event.inputs.instance_count }})
+        do
+          if [ $i -eq 1 ]; then
+            SUBNET_ID=subnet-000000a0000aa0a00
+          elif [ $i -eq 2 ]; then
+            SUBNET_ID=subnet-000000a0000aa0a00
+          else
+            SUBNET_ID=subnet-000000a0000aa0a00
+          fi
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id ${{ env.IMAGE_ID }} \
+            --count 1 \
+            --instance-type ${{ github.event.inputs.instance_type }} \
+            --key-name ${{ env.KEY_NAME }} \
+            --security-group-ids ${{ env.SECURITY_GROUP_IDS }} \
+            --subnet-id $SUBNET_ID \
+            --associate-public-ip-address \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=instance-$i}]" \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+          INSTANCE_IDS="$INSTANCE_IDS $INSTANCE_ID"
+        done
+        echo "INSTANCE_IDS=\"$INSTANCE_IDS\"" >> $GITHUB_ENV
+        echo "Instances created: $INSTANCE_IDS"
+
+    - name: Wait for EC2 instances to be running
+      run: |
+        INSTANCE_IDS=${{ env.INSTANCE_IDS }}
+        for INSTANCE_ID in $INSTANCE_IDS
+        do
+          echo "Waiting for instance $INSTANCE_ID to be in running state..."
+          aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+        done
+        echo "All instances are running: $INSTANCE_IDS"
+
+    - name: Print Instance IDs
+      run: |
+        echo "Instance IDs: $INSTANCE_IDS"
+
+  add_load_balancer:
+    if: ${{ github.event.inputs.add_load_balancer == 'oui' }}
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ github.event.inputs.aws_region }}
+
+    - name: Create Load Balancer
+      id: create_lb
+      run: |
+        LOAD_BALANCER_ARN=$(aws elbv2 create-load-balancer \
+          --name my-load-balancer-$(date +%s) \
+          --subnets subnet-000000a0000aa0a00 subnet-000000a0000aa0a00 \
+          --security-groups sg-000000a0000aa0a00 \
+          --scheme internet-facing \
+          --query 'LoadBalancers[0].LoadBalancerArn' \
+          --output text)
+        echo "LOAD_BALANCER_ARN=$LOAD_BALANCER_ARN" >> $GITHUB_ENV
+        echo "Created Load Balancer: $LOAD_BALANCER_ARN"
+
+    - name: Create Target Group
+      id: create_target_group
+      run: |
+        TARGET_GROUP_ARN=$(aws elbv2 create-target-group \
+          --name my-target-group-$(date +%s) \
+          --protocol HTTP \
+          --port 80 \
+          --vpc-id vpc-000000a0000aa0a00 \
+          --query 'TargetGroups[0].TargetGroupArn' \
+          --output text)
+        echo "TARGET_GROUP_ARN=$TARGET_GROUP_ARN" >> $GITHUB_ENV
+        echo "Created Target Group: $TARGET_GROUP_ARN"
+
+    - name: Register Targets
+      run: |
+        INSTANCE_IDS="${{ env.INSTANCE_IDS }}"
+        TARGET_GROUP_ARN="${{ env.TARGET_GROUP_ARN }}"
+        echo "Registering targets: $INSTANCE_IDS"
+        
+        # Convert the INSTANCE_IDS string to an array
+        INSTANCE_IDS_ARRAY=($INSTANCE_IDS)
+
+        for INSTANCE_ID in "${INSTANCE_IDS_ARRAY[@]}"
+        do
+          echo "Registering target: $INSTANCE_ID"
+          aws elbv2 register-targets \
+            --target-group-arn $TARGET_GROUP_ARN \
+            --targets Id=$INSTANCE_ID
+          echo "Registered target: $INSTANCE_ID"
+        done
+
+    - name: Create Listener
+      run: |
+        aws elbv2 create-listener \
+          --load-balancer-arn ${{ env.LOAD_BALANCER_ARN }} \
+          --protocol HTTP \
+          --port 80 \
+          --default-actions Type=forward,TargetGroupArn=${{ env.TARGET_GROUP_ARN }}
+        echo "Created Listener for Load Balancer"
