@@ -1,0 +1,35 @@
+name: Deploy EC2 Instance
+
+on: 
+  push:
+    branches:
+      - #main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+    - name: Deploy EC2 instances
+      run: |
+        INSTANCE_COUNT=2  # number of instance
+        for i in $(seq 1 $INSTANCE_COUNT)
+        do
+          aws ec2 run-instances \
+            --image-id ami-0q000000e000000d0 \
+            --count 1 \
+            --instance-type t2.micro \
+            --key-name AWX__KEY \
+            --security-group-ids sg-0a0aaaa0a0a0a0aaa \
+            --subnet-id subnet-0000a00000a000a0 \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=instance-$i}]'
+        done
